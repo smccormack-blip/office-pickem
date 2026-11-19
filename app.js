@@ -351,12 +351,19 @@ async function ensureWeekDoc(id, year, x, games) {
   return doc;
 }
 const SAFETY = 30_000;  // wait 30s after kickoff before asking for everyone's picks (clock differences)
+// Picks can't change after kickoff, so once a game's picks are fetched they're kept on this
+// device for good. Live-score refreshes then cost no database reads (keeps us far under quota).
 async function crowdFor(id, games, doc) {
-  const out = {};
+  const ck = `pickem-crowd|${S.L}|${id}`;
+  let cache = {}; try { cache = JSON.parse(ls.get(ck)) || {}; } catch { /* none */ }
+  const out = {}; let added = false;
   await Promise.all(games.map(async g => {
     const k = doc?.games?.[g.id]?.kickoff;
-    if (k && Date.now() >= k + SAFETY) { try { out[g.id] = await S.api.getGamePicks(S.L, id, g.id); } catch { /* not open yet */ } }
+    if (!k || Date.now() < k + SAFETY) return;
+    if (cache[g.id] && cache[g.id].k === k) { out[g.id] = cache[g.id].p; return; }
+    try { out[g.id] = await S.api.getGamePicks(S.L, id, g.id); cache[g.id] = { k, p: out[g.id] }; added = true; } catch { /* not open yet */ }
   }));
+  if (added) ls.set(ck, JSON.stringify(cache));
   return out;
 }
 // Tiebreaker game: the last game of the week (usually Monday night).
@@ -376,9 +383,14 @@ async function viewPicks(seq, quiet = false) {
   }
   if (!games.length) { if (live(seq)) $('#games').innerHTML = `<div class="card center"><p>No games posted for ${espn.weekLabel(x)} yet.</p></div>`; return; }
   if (!live(seq)) return;
-  const doc = await ensureWeekDoc(id, year, x, games);
+  // Automatic refreshes (live scores, kickoff locks) reuse the schedule and your picks already
+  // loaded on this page, so they cost no database reads beyond newly-started games' picks.
+  const reuse = quiet && S.pickCtx?.id === id ? S.pickCtx : null;
+  const doc = reuse ? reuse.doc : await ensureWeekDoc(id, year, x, games);
   if (!live(seq)) return;
-  const [mine, crowd] = await Promise.all([S.api.getMyPicks(S.L, id, games.map(g => g.id), S.me.prevUids || []), crowdFor(id, games, doc)]);
+  const [mine, crowd] = await Promise.all([
+    reuse ? reuse.mine : S.api.getMyPicks(S.L, id, games.map(g => g.id), S.me.prevUids || []),
+    crowdFor(id, games, doc)]);
   if (!live(seq)) return;
   const tb = tbGameOf(games);
   S.pickCtx = { id, games, doc, mine, tbId: tb?.id };
