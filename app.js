@@ -1,6 +1,7 @@
 import { firebaseConfig, SITE_NAME } from './config.js';
 import * as espn from './espn.js';
 import * as sfx from './sounds.js';
+import * as coach from './coach.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -125,7 +126,7 @@ function tabs(path) {
   if (isCommish()) t.push(['/commish', 'Commish']);
   $('#tabs').innerHTML = t.map(([p, l]) => `<a href="#${p}" data-tab="${p}" class="${path === p ? 'on' : ''}">${l}${p === '/commish' ? '<span class="count"></span>' : ''}</a>`).join('');
 }
-const coachHero = (title, sub) => `<div class="hero"><img class="coach" src="coach.jpg" alt=""><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div>`;
+const coachHero = (title, sub) => `<div class="hero"><img class="crest" src="logo.png" alt="Office Pick 'Em"><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div>`;
 
 function render() {
   clearTimers();
@@ -148,16 +149,25 @@ function render() {
   tabs(p); chrome();
   if (S.viewIdx == null) S.viewIdx = Math.max(curIdx(), startIdx());
   ({ '/picks': viewPicks, '/standings': viewStandings, '/grid': viewGrid, '/commish': viewCommish })[p](seq);
-  if (!$('#modal.show')) {
-    if (isCommish() && !ls.get(`pickem-cwelcome-${S.L}-${S.api.uid}`)) commishWelcome();
-    else gamblingReminder();
+  if (!$('#modal.show') && !$('#entrance')) {
+    const wkId = espn.weekDocId(S.league.season, espn.WEEKS[curIdx()]);
+    const ek = `pickem-entrance-${S.L}-${wkId}`;
+    const after = () => {
+      if (isCommish() && !ls.get(`pickem-cwelcome-${S.L}-${S.api.uid}`)) commishWelcome();
+      else gamblingReminder();
+    };
+    if (!ls.get(ek)) { ls.set(ek, '1'); coach.bustThrough(S.league.name, `${espn.weekLabel(espn.WEEKS[curIdx()])} · Let's go!`).then(after); }
+    else after();
   }
 }
 const main = (html) => { $('#main').innerHTML = html; };
 const live = (seq) => seq === S.seq;
 
+// Messages come from the coach, in a speech bubble.
 function toast(msg, bad) {
-  const t = $('#toast'); t.textContent = msg; t.className = 'show' + (bad ? ' bad' : '');
+  const t = $('#toast');
+  t.innerHTML = `<img src="coach-face.jpg" alt=""><div class="bubble">${esc(msg)}</div>`;
+  t.className = 'show' + (bad ? ' bad' : '');
   clearTimeout(toast.h); toast.h = setTimeout(() => { t.className = ''; }, 3200);
 }
 function errMsg(e) {
@@ -193,14 +203,14 @@ function gamblingReminder() {
   const k = `pickem-gamble-${S.L}-${espn.weekDocId(S.league.season, espn.WEEKS[curIdx()])}`;
   if (ls.get(k)) return;
   ls.set(k, '1');
-  modal(`<div class="center"><img class="coach sm" src="coach.jpg" alt=""><h2>A word from the Commissioner's office</h2>
+  modal(`<div class="center"><img class="crest sm" src="logo.png" alt=""><h2>A word from Coach</h2>
     <p class="bigquote">Gambling for real money is bad for you, your family, and civilization. It's like crack for your soul. <b>But have fun!</b></p>
     <button class="btn" data-act="close">Let's play</button></div>`);
 }
 async function commishWelcome() {
   ls.set(`pickem-cwelcome-${S.L}-${S.api.uid}`, '1');
   const s = await S.api.getSecrets(S.L).catch(() => ({}));
-  modal(`<div class="center"><img class="coach sm" src="coach.jpg" alt=""><h2>You're the Commissioner 🎖️</h2></div>
+  modal(`<div class="center"><img class="crest sm" src="logo.png" alt=""><h2>You're the Commissioner 🎖️</h2></div>
     <p><b>1. Save your recovery link.</b> If your PIN ever fails you, this link gets your Commissioner powers back. Email it to yourself; don't share it.</p>
     ${s.recovery ? copyBox(recoverLink(S.L, s.recovery)) : '<p class="muted">You can find it later under Commissioner → League settings.</p>'}
     <p><b>2. Invite players</b> from the Invite section on the Commissioner page, and let them in as they ask to join.</p>
@@ -375,7 +385,7 @@ const logo = (t) => t.logo ? `<img class="logo" src="${esc(t.logo)}" alt="" load
 // ───────────────────────── My Picks ─────────────────────────
 async function viewPicks(seq, quiet = false) {
   const idx = S.viewIdx, x = espn.WEEKS[idx], year = S.league.season, id = espn.weekDocId(year, x);
-  if (!quiet) main(`${weekNav(idx)}<div id="games"><div class="loading">Loading ${espn.weekLabel(x)}…</div></div>`);
+  if (!quiet) main(`${weekNav(idx)}<div id="games">${coach.loadingHTML(`Coach is pulling up ${espn.weekLabel(x)}…`)}</div>`);
   let games;
   try { games = await espn.week(year, x, { fresh: true }); } catch (e) {
     if (live(seq) && !quiet) $('#games').innerHTML = `<div class="card center"><p>Couldn't load games from ESPN (${esc(e.message)}).</p><button class="btn" data-act="rerender">Try again</button></div>`;
@@ -439,7 +449,8 @@ function resultSounds(id, games, mine, ov) {
     seen[g.id] = 1; if (mine[g.id].team === win) r++; else w++;
   }
   ls.set(k, JSON.stringify(seen));
-  if (r) sfx.cheer(); else if (w) sfx.groan();
+  if (r) { sfx.cheer(); coach.react(true, w ? `${r} right, ${w} wrong. Coach'll take it!` : r > 1 ? `Nailed it! ${r} more right.` : 'Nailed it! Another one right.'); }
+  else if (w) { sfx.groan(); coach.react(false, w > 1 ? `Ouch. ${w} misses. Shake it off.` : 'Ouch. That one got away.'); }
 }
 function gameCard(g, lockAt, my, crowd, win, override, isTb) {
   const locked = Date.now() >= lockAt, myTeam = my?.team;
@@ -538,7 +549,7 @@ function scoreMember(m, wd) {
 }
 
 async function viewStandings(seq) {
-  main('<div class="loading">Tallying the scores…</div>');
+  main(coach.loadingHTML('Coach is tallying the scores…'));
   const year = S.league.season, lo = startIdx(), hi = curIdx();
   const idxs = []; for (let i = lo; i <= hi; i++) idxs.push(i);
   const weeks = (await Promise.all(idxs.map(i => weekData(year, i).catch(() => null)))).filter(Boolean);
@@ -572,25 +583,31 @@ async function viewStandings(seq) {
       ${hasCarry ? `<td class="dim">${r.carry}</td>` : ''}${showIdx.map(i => `<td>${r.wk[i] ? `${r.wk[i].w}-${r.wk[i].l}` : '0-0'}</td>`).join('')}<td><b>${r.total}</b></td></tr>`).join('')}</tbody></table></div>
     <p class="muted small">1 point per correct pick (weekly columns show wins-losses; a missed pick is a loss). Ties and no-contest games count for nobody. ${hasCarry ? '“Before” = points carried over from the old pool. ' : ''}Tied totals are broken by the season's tiebreaker guesses (smallest total miss). ★ = Picker of the Week. The current week updates live.</p></div>
     <div class="card"><h2>Picker of the Week</h2>
-    ${latest ? `<div class="potw"><img class="coach sm" src="coach.jpg" alt=""><div><div class="muted small">${espn.weekLabel(espn.WEEKS[latest.idx])}</div><div class="potwname">${latest.who.map(esc).join(' & ')}</div>
-      <div class="muted small">${latest.score}/${latest.of} correct${latest.tbMiss < TB_MISSING ? ` · tiebreaker off by ${latest.tbMiss}` : ''}</div></div></div>` : ''}
-    ${winners.length > 1 ? winners.slice(0, -1).reverse().map(w => `<div class="winner"><span>${espn.weekLabel(espn.WEEKS[w.idx])}</span><b>${w.who.map(esc).join(', ')}</b><span class="muted">${w.score}/${w.of}</span></div>`).join('') : ''}
+    ${latest ? `<div class="potw"><img class="crest sm" src="logo.png" alt=""><div><div class="muted small">${espn.weekLabel(espn.WEEKS[latest.idx])}</div><div class="potwname">${latest.who.map(esc).join(' & ')}</div>
+      <div class="muted small">${latest.score}/${latest.of} correct${latest.tbMiss < TB_MISSING ? ` · tiebreaker off by ${latest.tbMiss}` : ''}</div>
+      <button class="btn sm" data-act="cert" data-i="${winners.length - 1}" style="margin-top:6px">🏅 View certificate</button></div></div>` : ''}
+    ${winners.length > 1 ? winners.slice(0, -1).map((w, i) => ({ w, i })).reverse().map(({ w, i }) => `<div class="winner"><span>${espn.weekLabel(espn.WEEKS[w.idx])}</span><b>${w.who.map(esc).join(', ')}</b><span class="muted">${w.score}/${w.of}</span><button class="link" data-act="cert" data-i="${i}">certificate</button></div>`).join('') : ''}
     ${!winners.length ? '<p class="muted">No completed weeks yet.</p>' : ''}</div>`);
+  S.winners = winners;
   if (latest && latest.ids.includes(S.me.id)) {
     const k = `pickem-potw-${S.L}-${latest.idx}`;
-    if (!ls.get(k)) { ls.set(k, '1'); sfx.fanfare(); confetti(); toast(`You're Picker of the Week! 🏆`); }
+    if (!ls.get(k)) { ls.set(k, '1'); sfx.fanfare(); coach.confetti(); showCertificate(winners.length - 1); }
   }
 }
-function confetti() {
-  const box = document.createElement('div'); box.className = 'confetti';
-  box.innerHTML = Array.from({ length: 28 }, (_, i) => `<span style="left:${Math.random() * 100}%;animation-delay:${Math.random() * 0.6}s;animation-duration:${1.6 + Math.random()}s">${['🏈', '🏆', '⭐', '🎉'][i % 4]}</span>`).join('');
-  document.body.appendChild(box); setTimeout(() => box.remove(), 3500);
+
+function showCertificate(i) {
+  const w = S.winners?.[i]; if (!w) return;
+  const cm = S.members.find(m => m.id === S.league.commissionerUid);
+  modal(coach.certificateHTML({ names: w.who, week: espn.weekLabel(espn.WEEKS[w.idx]), score: w.score, of: w.of,
+    tbMiss: w.tbMiss < TB_MISSING ? w.tbMiss : null, commissioner: cm?.name, league: S.league.name }) +
+    `<p class="muted small center">Take a screenshot to share it.</p>`);
+  $('#modal .sheet').classList.add('wide');
 }
 
 // ───────────────────────── Everyone's Picks ─────────────────────────
 async function viewGrid(seq) {
   const idx = S.viewIdx, x = espn.WEEKS[idx], year = S.league.season, id = espn.weekDocId(year, x);
-  main(`${weekNav(idx)}<div id="grid"><div class="loading">Loading…</div></div>`);
+  main(`${weekNav(idx)}<div id="grid">${coach.loadingHTML()}</div>`);
   let games; try { games = await espn.week(year, x); } catch { if (live(seq)) $('#grid').innerHTML = `<p class="center">Couldn't reach ESPN.</p>`; return; }
   const doc = await S.api.getWeek(S.L, id).catch(() => null);
   const crowd = doc ? await crowdFor(id, games, doc) : {};
@@ -638,7 +655,7 @@ async function viewCommish(seq) {
     ${gone.length ? `<details><summary>Removed players (${gone.length})</summary>${gone.map(m => `<div class="req"><span>${esc(m.name)}</span><button class="btn sm ghost" data-act="reinstate" data-u="${m.id}">Reinstate</button></div>`).join('')}</details>` : ''}
   </div>
 
-  <div class="card"><h2>Results & rulings</h2>${weekNav(S.viewIdx)}<div id="rulings"><div class="loading">Loading games…</div></div></div>
+  <div class="card"><h2>Results & rulings</h2>${weekNav(S.viewIdx)}<div id="rulings">${coach.loadingHTML('Coach is checking the scoreboard…')}</div></div>
 
   <div class="card"><h2>League settings</h2>
     <label>League name<input id="lgNameIn" maxlength="60" value="${esc(S.league.name)}"></label>
@@ -741,7 +758,8 @@ async function onClick(e) {
   if (act === 'leave') { ls.del(LS_LEAGUE); S.L = null; location.hash = '#/'; return route(); }
   if (act === 'reclaim') return reclaim(el.dataset.l, el.dataset.r);
   if (act === 'how') return modal(HOW);
-  if (act === 'legal') { sfx.legalMumboJumbo(); return modal(LEGAL); }
+  if (act === 'cert') return showCertificate(Number(el.dataset.i));
+  if (act === 'legal') { sfx.legalMumboJumbo(); return modal(coach.judgeHTML() + LEGAL); }
   if (act === 'mute') { sfx.setMuted(!sfx.isMuted()); el.textContent = sfx.isMuted() ? '🔇' : '🔊'; toast(sfx.isMuted() ? 'Sound off' : 'Sound on'); if (!sfx.isMuted()) sfx.whistle(); return; }
   if (act === 'account') return account();
   if (act === 'myPin') { const pin = await askPin('Choose a new PIN'); if (pin) { try { await S.api.setPin(S.L, S.api.uid, pin); toast('PIN changed.'); } catch (err) { toast(errMsg(err), true); } } return; }
