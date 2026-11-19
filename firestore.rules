@@ -1,0 +1,158 @@
+rules_version = '2';
+// Security rules for Office Pick 'Em. These run on Google's servers, so the
+// Commissioner's powers, PINs and kickoff locks can't be bypassed from a browser.
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    match /leagues/{L} {
+      function root() { return /databases/$(db)/documents/leagues/$(L); }
+      function lg() { return get(root()).data; }
+      function mpath(u) { return /databases/$(db)/documents/leagues/$(L)/members/$(u); }
+      function pinpath(u) { return /databases/$(db)/documents/leagues/$(L)/pins/$(u); }
+      function movepath(u) { return /databases/$(db)/documents/leagues/$(L)/moves/$(u); }
+      function secretCode(k) { return get(/databases/$(db)/documents/leagues/$(L)/secret/$(k)).data.code; }
+      function isCommish() { return signedIn() && lg().commissionerUid == request.auth.uid; }
+      function isActive() {
+        return signedIn() && exists(mpath(request.auth.uid))
+          && get(mpath(request.auth.uid)).data.status == 'active';
+      }
+      function inLeague() { return isActive() || isCommish(); }
+      function okName(n) { return n is string && n.size() > 0 && n.size() <= 40; }
+      function okLeague(d) {
+        return d.name is string && d.name.size() > 0 && d.name.size() <= 60
+          && d.overrides is map && d.season is int && d.startWeek is string;
+      }
+      // "I moved to a new device": caller proved they know an active player's PIN.
+      function moveFrom() { return get(movepath(request.auth.uid)).data.from; }
+      function moveOk() {
+        return signedIn() && exists(movepath(request.auth.uid))
+          && get(movepath(request.auth.uid)).data.pin == get(pinpath(moveFrom())).data.pin;
+      }
+
+      // ── League: name, season, start week, Commissioner, result rulings ──
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.commissionerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['name', 'season', 'startWeek', 'commissionerUid', 'overrides', 'createdAt'])
+        && okLeague(request.resource.data);
+      allow update: if
+        // Commissioner edits name/rulings, or hands the job to an active player.
+        (isCommish()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'startWeek', 'overrides', 'commissionerUid'])
+          && okLeague(request.resource.data)
+          && (request.resource.data.commissionerUid == resource.data.commissionerUid
+              || get(mpath(request.resource.data.commissionerUid)).data.status == 'active'))
+        // Holder of the current recovery code reclaims the job.
+        || (signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commissionerUid'])
+          && request.resource.data.commissionerUid == request.auth.uid
+          && get(/databases/$(db)/documents/leagues/$(L)/claims/$(request.auth.uid)).data.code == secretCode('recovery'))
+        // The Commissioner moved to a new device with their PIN.
+        || (moveOk() && resource.data.commissionerUid == moveFrom()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commissionerUid'])
+          && request.resource.data.commissionerUid == request.auth.uid);
+
+      // ── Invite code and recovery code: Commissioner-only ──
+      match /secret/{k} {
+        allow read: if isCommish();
+        allow create, update: if isCommish() && k in ['invite', 'recovery']
+          && request.resource.data.keys().hasOnly(['code'])
+          && request.resource.data.code is string && request.resource.data.code.size() >= 6;
+      }
+
+      // Write-only proof of holding the recovery code (never readable).
+      match /claims/{u} {
+        allow create, update: if signedIn() && u == request.auth.uid
+          && request.resource.data.keys().hasOnly(['code'])
+          && request.resource.data.code == secretCode('recovery');
+      }
+
+      // ── PINs: 4 digits, never readable. Set by the player; reset by the Commissioner ──
+      match /pins/{u} {
+        allow create, update: if signedIn() && (u == request.auth.uid || isCommish())
+          && request.resource.data.keys().hasOnly(['pin'])
+          && request.resource.data.pin is string && request.resource.data.pin.matches('^[0-9]{4}$');
+      }
+
+      // Write-only "move to this device" claim; only accepted with the right PIN.
+      match /moves/{u} {
+        allow create, update: if signedIn() && u == request.auth.uid
+          && request.resource.data.keys().hasOnly(['from', 'pin'])
+          && request.resource.data.from is string && request.resource.data.from != request.auth.uid
+          && get(mpath(request.resource.data.from)).data.status == 'active'
+          && request.resource.data.pin == get(pinpath(request.resource.data.from)).data.pin;
+      }
+
+      // ── Players. status: pending | active | removed | replaced ──
+      match /members/{u} {
+        allow read: if signedIn();
+        allow create: if signedIn() && u == request.auth.uid
+          && request.resource.data.keys().hasOnly(['name', 'status', 'carryover', 'prevUids', 'joinedAt', 'code'])
+          && okName(request.resource.data.name)
+          && request.resource.data.carryover is int
+          && request.resource.data.prevUids is list
+          && (
+            // a newcomer with the current invite code may only ask to join
+            (request.resource.data.status == 'pending'
+              && request.resource.data.carryover == 0
+              && request.resource.data.prevUids.size() == 0
+              && request.resource.data.code == secretCode('invite'))
+            // the Commissioner adds themself
+            || (request.resource.data.status == 'active' && isCommish())
+            // a player moving to a new device takes over their own record (needs their PIN)
+            || (request.resource.data.status == 'active' && moveOk()
+              && get(mpath(moveFrom())).data.status == 'active'
+              && request.resource.data.name == get(mpath(moveFrom())).data.name
+              && request.resource.data.carryover == get(mpath(moveFrom())).data.carryover
+              && request.resource.data.prevUids == [moveFrom()].concat(get(mpath(moveFrom())).data.prevUids))
+          );
+        allow update: if
+          (isCommish()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'status', 'carryover', 'prevUids'])
+            && okName(request.resource.data.name)
+            && request.resource.data.status in ['pending', 'active', 'removed', 'replaced']
+            && request.resource.data.carryover is int
+            && request.resource.data.prevUids is list)
+          || (u == request.auth.uid
+            && resource.data.status in ['pending', 'active']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+            && okName(request.resource.data.name))
+          // the old device's record is retired after a PIN move
+          || (moveOk() && u == moveFrom() && resource.data.status == 'active'
+            && exists(mpath(request.auth.uid))
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+            && request.resource.data.status == 'replaced');
+        allow delete: if resource.data.status == 'pending' && (isCommish() || u == request.auth.uid);
+      }
+
+      // ── Each week's schedule (copied from ESPN). Kickoff times here lock picks ──
+      match /weeks/{wk} {
+        allow read: if inLeague();
+        allow create: if inLeague()
+          && request.resource.data.keys().hasOnly(['season', 'week', 'games'])
+          && request.resource.data.games is map;
+        allow update: if isCommish()
+          && request.resource.data.keys().hasOnly(['season', 'week', 'games'])
+          && request.resource.data.games is map;
+
+        // One pick per player per game (+ optional tiebreaker total).
+        // Hidden from others until kickoff; frozen at kickoff.
+        match /games/{g}/picks/{u} {
+          function game() { return get(/databases/$(db)/documents/leagues/$(L)/weeks/$(wk)).data.games[g]; }
+          allow read: if inLeague() && (u == request.auth.uid
+            || (isActive() && u in get(mpath(request.auth.uid)).data.prevUids)
+            || request.time >= game().kickoff);
+          allow create, update: if isActive() && u == request.auth.uid
+            && request.time < game().kickoff
+            && request.resource.data.keys().hasOnly(['team', 'at', 'total'])
+            && request.resource.data.team in [game().home, game().away]
+            && (!('total' in request.resource.data)
+                || (request.resource.data.total is int && request.resource.data.total >= 0 && request.resource.data.total <= 200));
+          allow delete: if isActive() && u == request.auth.uid && request.time < game().kickoff;
+        }
+      }
+    }
+  }
+}

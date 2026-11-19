@@ -1,0 +1,9 @@
+{
+  "name": "Office Pick 'Em",
+  "short_name": "Pick 'Em",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f4ee",
+  "theme_color": "#0f2a1d",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
